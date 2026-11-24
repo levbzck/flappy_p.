@@ -1,0 +1,640 @@
+
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Flappy Challenge</title>
+
+<style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    html, body {
+        height: 100%;
+        overflow: hidden;
+        background: #111;
+        font-family: Arial, sans-serif;
+        touch-action: manipulation;
+    }
+
+    #game {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+        cursor: pointer;
+    }
+
+    #ui {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        color: #fff;
+        text-align: center;
+        pointer-events: none;
+        text-shadow: 2px 2px 4px #000;
+        display: none;
+    }
+
+    #ui h1 { font-size: 42px; margin-bottom: 12px; }
+    #ui p { font-size: 20px; margin: 6px 0; }
+
+    #score {
+        position: absolute;
+        top: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        color: #fff;
+        font-size: 48px;
+        font-weight: bold;
+        text-shadow: 3px 3px 0 #000;
+        pointer-events: none;
+        z-index: 5;
+    }
+</style>
+</head>
+
+<body>
+
+<canvas id="game"></canvas>
+<div id="score">0</div>
+
+<div id="ui">
+    <h1>Flappy Challenge</h1>
+    <p id="ui-msg">Клик — прыжок</p>
+    <p id="ui-restart">Клик — заново</p>
+</div>
+
+<script>
+(() => {
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+const scoreEl = document.getElementById('score');
+const uiEl = document.getElementById('ui');
+const uiMsg = document.getElementById('ui-msg');
+const uiRestart = document.getElementById('ui-restart');
+
+let W, H;
+
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+}
+
+resize();
+window.addEventListener('resize', resize);
+
+// ---------- Состояние игры ----------
+
+const STATE = {
+    MENU: 'menu',
+    PLAY: 'play',
+    OVER: 'over'
+};
+
+let state = STATE.MENU;
+let score = 0;
+let best = +localStorage.getItem('flappy_best') || 0;
+
+// ---------- Персонаж ----------
+
+const bird = {
+    x: 0,
+    y: 0,
+    vy: 0,
+    r: 15,
+    rot: 0,
+    wings: 0
+};
+
+// ---------- Параметры физики ----------
+
+const GRAVITY = 1700;
+const FLAP_POWER = -450;
+
+// ---------- Трубы ----------
+
+const pipes = [];
+let pipeTimer = 0;
+
+const PIPE_INTERVAL = 1.5;
+const PIPE_WIDTH = 48;
+const GAP_BASE = 110;
+const PIPE_SPEED = 220;
+
+// ---------- Параллакс-фон ----------
+
+const clouds = [];
+
+function initClouds() {
+    clouds.length = 0;
+
+    for (let i = 0; i < 10; i++) {
+        clouds.push({
+            x: Math.random() * W,
+            y: Math.random() * H * 0.6 + 20,
+            s: Math.random() * 60 + 40,
+            sp: Math.random() * 30 + 15
+        });
+    }
+}
+
+initClouds();
+
+// ---------- Холмы ----------
+
+const hills = [];
+
+for (let i = 0; i < 8; i++) {
+    hills.push({
+        x: Math.random() * W,
+        w: Math.random() * 200 + 150,
+        h: Math.random() * 120 + 80
+    });
+}
+
+// ---------- Инициализация персонажа ----------
+
+function resetBird() {
+    bird.x = W * 0.25;
+    bird.y = H * 0.45;
+    bird.vy = 0;
+    bird.rot = 0;
+}
+
+function resetGame() {
+    score = 0;
+    scoreEl.textContent = '0';
+    pipes.length = 0;
+    pipeTimer = 0;
+    resetBird();
+}
+
+// ---------- Управление ----------
+
+function flap() {
+
+    if (state === STATE.MENU) {
+        state = STATE.PLAY;
+        uiEl.style.display = 'none';
+
+        resetGame();
+        bird.vy = FLAP_POWER;
+        return;
+    }
+
+    if (state === STATE.PLAY) {
+        bird.vy = FLAP_POWER;
+        bird.wings = 1;
+    }
+
+    else if (state === STATE.OVER) {
+        state = STATE.MENU;
+        uiEl.style.display = 'block';
+        uiMsg.style.display = 'block';
+        uiRestart.style.display = 'none';
+
+        resetGame();
+    }
+}
+
+// Клик  
+
+window.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    flap();
+});
+
+window.addEventListener('keydown', (e) => {
+    if (e.code === 'Space' || e.code === 'ArrowUp') {
+        e.preventDefault();
+        if (!e.repeat) flap();
+    }
+});
+
+// ---------- Спавн труб ----------
+
+function spawnPipe() {
+
+    const gap = GAP_BASE * (0.85 + Math.random() * 0.3);
+
+    const minMargin = 60;
+    const minTop = minMargin + gap / 2;
+    const maxTop = H - minMargin - gap / 2;
+
+    const gapCenter =
+        minTop + Math.random() * (maxTop - minTop);
+
+    const topH = gapCenter - gap / 2;
+    const bottomH = H - (gapCenter + gap / 2);
+
+    pipes.push({
+        x: W,
+        topH: topH,
+        bottomH: bottomH,
+        gap: gap,
+        scored: false
+    });
+}
+
+// ---------- Обновление ----------
+
+function update(dt) {
+
+    // ---- Фон ----
+
+    const bgSpeed = (state === STATE.PLAY ? 1 : 0.5);
+
+    for (const c of clouds) {
+        c.x -= c.sp * dt * bgSpeed;
+
+        if (c.x + c.s < 0) {
+            c.x = W + c.s;
+            c.y = Math.random() * H * 0.6 + 20;
+        }
+    }
+
+    for (const h of hills) {
+        h.x -= 40 * dt * bgSpeed;
+
+        if (h.x + h.w < 0) {
+            h.x = W + h.w;
+            h.w = Math.random() * 200 + 150;
+            h.h = Math.random() * 120 + 80;
+        }
+    }
+
+    if (state !== STATE.PLAY) {
+
+        if (state === STATE.MENU) {
+            bird.y = H * 0.45 +
+                Math.sin(performance.now() / 400) * 15;
+
+            bird.rot = Math.sin(performance.now() / 400) * 0.15;
+        }
+
+        return;
+    }
+
+    // ---- Физика персонажа ----
+
+    bird.vy += GRAVITY * dt;
+    bird.y += bird.vy * dt;
+
+    bird.rot = Math.max(
+        -0.5,
+        Math.min(1.4, bird.vy / 700)
+    );
+
+    if (bird.wings > 0) {
+        bird.wings = Math.max(0, bird.wings - dt * 3);
+    }
+
+    // Верх экрана
+
+    if (bird.y - bird.r < 0) {
+        bird.y = bird.r;
+        bird.vy = 0;
+    }
+
+    // Низ экрана
+
+    if (bird.y + bird.r > H - 40) {
+        gameOver();
+        return;
+    }
+
+    // ---- Трубы ----
+
+    pipeTimer += dt;
+
+    if (pipeTimer >= PIPE_INTERVAL) {
+        pipeTimer = 0;
+        spawnPipe();
+    }
+
+    for (let i = pipes.length - 1; i >= 0; i--) {
+
+        const p = pipes[i];
+
+        p.x -= PIPE_SPEED * dt;
+
+        // Очки
+
+        if (!p.scored && p.x + PIPE_WIDTH < bird.x) {
+            p.scored = true;
+            score++;
+            scoreEl.textContent = score;
+        }
+
+        // Столкновение
+
+        if (collide(bird, p)) {
+            gameOver();
+            return;
+        }
+
+        // Удаление за экраном
+
+        if (p.x + PIPE_WIDTH < 0) {
+            pipes.splice(i, 1);
+        }
+    }
+}
+
+// ---------- Коллизии ----------
+
+function circleRect(cx, cy, r, rx, ry, rw, rh) {
+
+    const nx = Math.max(rx, Math.min(cx, rx + rw));
+    const ny = Math.max(ry, Math.min(cy, ry + rh));
+
+    const dx = cx - nx;
+    const dy = cy - ny;
+
+    return dx * dx + dy * dy < r * r;
+}
+
+function collide(b, p) {
+
+    // Верхняя труба
+
+    if (circleRect(
+        b.x, b.y, b.r,
+        p.x, 0, PIPE_WIDTH, p.topH
+    )) return true;
+
+    // Нижняя труба
+
+    const by = p.topH + p.gap;
+
+    if (circleRect(
+        b.x, b.y, b.r,
+        p.x, by, PIPE_WIDTH, p.bottomH
+    )) return true;
+
+    return false;
+}
+
+// ---------- Конец игры ----------
+
+function gameOver() {
+
+    state = STATE.OVER;
+
+    if (score > best) {
+        best = score;
+        localStorage.setItem('flappy_best', best);
+    }
+
+    uiEl.style.display = 'block';
+    uiMsg.style.display = 'none';
+    uiRestart.style.display = 'block';
+
+    uiRestart.textContent =
+        `Счёт: ${score}   Рекорд: ${best}\nКлик — заново`;
+
+    uiRestart.style.whiteSpace = 'pre-line';
+}
+
+// ---------- Отрисовка фона ----------
+
+function drawBackground() {
+
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+
+    g.addColorStop(0, '#4ec0ca');
+    g.addColorStop(0.7, '#8ed6dc');
+    g.addColorStop(1, '#d6f2e8');
+
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+
+    // Солнце
+
+    ctx.fillStyle = 'rgba(255, 245, 180, 0.7)';
+    ctx.beginPath();
+    ctx.arc(W * 0.85, H * 0.15, 60, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Холмы
+
+    ctx.fillStyle = '#79c47a';
+
+    for (const h of hills) {
+        ctx.beginPath();
+
+        ctx.ellipse(
+            h.x + h.w / 2,
+            H,
+            h.w / 2,
+            h.h,
+            0,
+            Math.PI,
+            0
+        );
+
+        ctx.fill();
+    }
+
+    ctx.fillStyle = '#5fb862';
+
+    for (const h of hills) {
+        ctx.beginPath();
+
+        ctx.ellipse(
+            h.x + h.w / 2 + 40,
+            H,
+            h.w / 2.5,
+            h.h * 0.7,
+            0,
+            Math.PI,
+            0
+        );
+
+        ctx.fill();
+    }
+
+    // Облака
+
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+
+    for (const c of clouds) {
+        ctx.beginPath();
+
+        ctx.arc(c.x, c.y, c.s * 0.5, 0, Math.PI * 2);
+        ctx.arc(c.x + c.s * 0.4, c.y + c.s * 0.1,
+            c.s * 0.4, 0, Math.PI * 2);
+        ctx.arc(c.x - c.s * 0.4, c.y + c.s * 0.15,
+            c.s * 0.35, 0, Math.PI * 2);
+
+        ctx.fill();
+    }
+
+    // Земля
+
+    const groundH = 40;
+
+    ctx.fillStyle = '#ded895';
+    ctx.fillRect(0, H - groundH, W, groundH);
+
+    ctx.fillStyle = '#c9c27a';
+    ctx.fillRect(0, H - groundH, W, 8);
+}
+
+// ---------- Отрисовка труб ----------
+
+function drawPipe(p) {
+
+    const grad = ctx.createLinearGradient(
+        p.x, 0, p.x + PIPE_WIDTH, 0
+    );
+
+    grad.addColorStop(0, '#5fbf3a');
+    grad.addColorStop(0.5, '#7ed957');
+    grad.addColorStop(1, '#4a9e2a');
+
+    // Верхняя труба
+
+    ctx.fillStyle = grad;
+
+    ctx.fillRect(p.x, 0, PIPE_WIDTH, p.topH);
+
+    ctx.fillRect(
+        p.x - 4,
+        p.topH - 19,
+        PIPE_WIDTH + 8,
+        19
+    );
+
+    // Нижняя труба
+
+    const by = p.topH + p.gap;
+
+    ctx.fillRect(
+        p.x, by, PIPE_WIDTH, H - by
+    );
+
+    ctx.fillRect(
+        p.x - 4, by, PIPE_WIDTH + 8, 19
+    );
+
+    // Контуры
+
+    ctx.strokeStyle = '#2e6b1a';
+    ctx.lineWidth = 2;
+
+    ctx.strokeRect(p.x, 0, PIPE_WIDTH, p.topH);
+
+    ctx.strokeRect(
+        p.x - 4, p.topH - 19,
+        PIPE_WIDTH + 8, 19
+    );
+
+    ctx.strokeRect(
+        p.x, by, PIPE_WIDTH, H - by
+    );
+
+    ctx.strokeRect(
+        p.x - 4, by, PIPE_WIDTH + 8, 19
+    );
+}
+
+// ---------- Отрисовка персонажа ----------
+
+function drawBird() {
+
+    ctx.save();
+
+    ctx.translate(bird.x, bird.y);
+    ctx.rotate(bird.rot);
+
+    // Тело
+
+    ctx.fillStyle = '#f3b5a0';
+    ctx.strokeStyle = '#9d655b';
+    ctx.lineWidth = 2;
+
+    ctx.beginPath();
+    ctx.roundRect(-9, -17, 18, 32, 9);
+    ctx.fill();
+    ctx.stroke();
+
+    // Глаз
+
+    ctx.fillStyle = '#fff';
+
+    ctx.beginPath();
+    ctx.arc(4, -7, 3.5, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = '#30201b';
+
+    ctx.beginPath();
+    ctx.arc(5, -7, 1.5, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
+}
+
+// ---------- Render ----------
+
+function render() {
+
+    drawBackground();
+
+    // Трубы
+
+    for (const p of pipes) {
+        drawPipe(p);
+    }
+
+    // Персонаж
+
+    drawBird();
+
+    // Затемнение после смерти
+
+    if (state === STATE.OVER) {
+        ctx.fillStyle = 'rgba(0,0,0,0.35)';
+        ctx.fillRect(0, 0, W, H);
+    }
+}
+
+// ---------- Игровой цикл ----------
+
+let last = performance.now();
+
+function loop(now) {
+
+    let dt = (now - last) / 1000;
+    last = now;
+
+    if (dt > 0.05) dt = 0.05;
+
+    update(dt);
+    render();
+
+    requestAnimationFrame(loop);
+}
+
+// ---------- Стартовый экран ----------
+
+resetBird();
+resetGame();
+
+uiEl.style.display = 'block';
+uiMsg.textContent = 'Клик — прыжок';
+uiRestart.style.display = 'none';
+
+requestAnimationFrame(loop);
+
+})();
+</script>
+</body>
+</html>
+
+
+
